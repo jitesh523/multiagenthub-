@@ -1,0 +1,8 @@
+asyncio
+websockets
+redis
+cryptography
+networkx
+pydantic
+openai
+pytest

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.build/
+.dist/
+.venv/
+venv/
+.env
+.env.*
+
+# Byte-compiled / optimized / DLL files
+*.pyc
+
+# Unit test / coverage
+.pytest_cache/
+.coverage*
+htmlcov/
+.tox/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# MacOS
+.DS_Store
+
+# Poetry/Build
+build/
+dist/
+site/
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,8 @@
+[project]
+name = "multiagenthub"
+version = "0.1.0"
+description = "Modular multi-agent collaboration system"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
