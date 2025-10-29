@@ -5,6 +5,7 @@ import uuid
 
 from multiagenthub.hub import Hub
 from multiagenthub.orchestrator import Orchestrator
+from multiagenthub.events import EventServer
 from multiagenthub.models import Task
 from multiagenthub.agents.researcher import ResearcherAgent
 from multiagenthub.agents.analyzer import AnalyzerAgent
@@ -13,6 +14,12 @@ from multiagenthub.agents.synthesizer import SynthesizerAgent
 
 async def main() -> None:
     hub = Hub()
+    # Start WebSocket event server (best-effort if websockets is installed)
+    ev = EventServer()
+    try:
+        await ev.start()
+    except Exception:
+        ev = None  # type: ignore[assignment]
 
     researcher = ResearcherAgent("researcher", ["research"], hub)
     analyzer = AnalyzerAgent("analyzer", ["analyze"], hub)
@@ -24,7 +31,7 @@ async def main() -> None:
         asyncio.create_task(synthesizer.start()),
     ]
 
-    orch = Orchestrator(hub)
+    orch = Orchestrator(hub, event_server=ev)
 
     t1 = Task(id=str(uuid.uuid4()), type="sequential", payload={"skill": "research", "query": "climate change impacts"})
     t2 = Task(id=str(uuid.uuid4()), type="sequential", deps=[t1.id], payload={"skill": "analyze"})
@@ -77,6 +84,12 @@ async def main() -> None:
 
     for t in tasks:
         t.cancel()
+    # Stop event server if running
+    if ev and hasattr(ev, "stop"):
+        try:
+            await ev.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

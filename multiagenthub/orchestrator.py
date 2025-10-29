@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 import networkx as nx
 
 from .hub import Hub
+from .persistence import BasePersistence, InMemoryPersistence
+from .events import EventServer
 from .models import Message, MessageType, Task, TaskState
 
 logger = logging.getLogger(__name__)
@@ -16,18 +18,22 @@ class Orchestrator:
     """
     Executes a DAG of tasks with retries, timeouts, and dynamic assignment.
     """
-    def __init__(self, hub: Hub):
+    def __init__(self, hub: Hub, persistence: BasePersistence | None = None, event_server: EventServer | None = None):
         self.hub = hub
         self.graph = nx.DiGraph()
         self.tasks: Dict[str, Task] = {}
         self.heartbeats: Dict[str, float] = {}
         self.heartbeat_timeout_s: float = 5.0
+        self.persistence: BasePersistence = persistence or InMemoryPersistence()
+        self.event_server: EventServer | None = event_server
 
     def add_task(self, task: Task) -> None:
         self.tasks[task.id] = task
         self.graph.add_node(task.id)
         for dep in task.deps:
             self.graph.add_edge(dep, task.id)
+        # persist structure
+        asyncio.create_task(self._persist())
 
     def ready_tasks(self) -> List[Task]:
         ready: List[Task] = []
@@ -48,10 +54,12 @@ class Orchestrator:
                 await asyncio.sleep(0.05)
                 continue
             await asyncio.gather(*(self._run_task(t) for t in batch))
+            await self._persist()
         return {tid: (t.result if t.result else {"error": t.error}) for tid, t in self.tasks.items()}
 
     async def _run_task(self, task: Task) -> None:
         if task.state != TaskState.pending:
+            await self._persist()
             return
         # Evaluate condition, if present, using merged predecessor results
         if task.condition:
@@ -67,17 +75,21 @@ class Orchestrator:
                 task.state = TaskState.skipped
                 task.result = {"skipped": True, "reason": "condition_false"}
                 logger.info("task_skipped id=%s condition=%s", task.id, task.condition)
+                await self._emit({"event": "task_skipped", "task_id": task.id})
+                await self._persist()
                 return
         task.state = TaskState.running
         task.attempts += 1
         logger.info(
             "task_start id=%s attempts=%d type=%s deps=%s", task.id, task.attempts, task.type, task.deps
         )
+        await self._emit({"event": "task_start", "task_id": task.id, "attempt": task.attempts, "type": task.type})
         required_skill = task.payload.get("skill")
         agent_id: Optional[str] = self.hub.get_agent_by_skill(required_skill) if required_skill else None
         if not agent_id:
             task.state, task.error = TaskState.failed, f"No agent for skill '{required_skill}'"
             logger.error("task_assignment_failed id=%s reason=no_agent skill=%s", task.id, required_skill)
+            await self._emit({"event": "task_failed", "task_id": task.id, "error": "no_agent", "skill": required_skill})
             return
         task.owner = agent_id
         logger.debug("task_assigned id=%s owner=%s skill=%s", task.id, agent_id, required_skill)
@@ -150,15 +162,19 @@ class Orchestrator:
                         task.max_retries,
                         (resp.error if resp else {"message": "timeout"}),
                     )
+                    await self._emit({"event": "task_retry", "task_id": task.id})
                     await asyncio.sleep(0)
                     return
                 task.state = TaskState.failed
                 task.error = (resp.error if resp else {"message": "timeout"}).__str__()
                 logger.error("task_failed id=%s error=%s", task.id, task.error)
+                await self._emit({"event": "task_failed", "task_id": task.id, "error": task.error})
                 return
             task.state = TaskState.completed
             task.result = resp.result or {}
         logger.info("task_completed id=%s owner=%s", task.id, task.owner)
+        await self._emit({"event": "task_completed", "task_id": task.id})
+        await self._persist()
         # Propagate outputs to dependent tasks (supports fan-in by merging predecessors)
         for succ in self.graph.successors(task.id):
             s = self.tasks[succ]
@@ -192,6 +208,30 @@ class Orchestrator:
                     # last-writer wins
                     merged[k] = v
         return merged
+
+    async def _persist(self) -> None:
+        data = {
+            "tasks": {tid: t.dict() for tid, t in self.tasks.items()},
+            "edges": [(u, v) for u, v in self.graph.edges()],
+        }
+        await self.persistence.save("orchestrator_state", data)
+
+    async def load(self) -> None:
+        data = await self.persistence.load("orchestrator_state")
+        if not data:
+            return
+        self.tasks = {tid: Task(**td) for tid, td in data.get("tasks", {}).items()}
+        self.graph = nx.DiGraph()
+        self.graph.add_nodes_from(self.tasks.keys())
+        for u, v in data.get("edges", []):
+            self.graph.add_edge(u, v)
+
+    async def _emit(self, payload: Dict[str, Any]) -> None:
+        if self.event_server is not None:
+            try:
+                await self.event_server.broadcast(payload)
+            except Exception:  # pragma: no cover - event errors shouldn't break execution
+                logger.debug("event_emit_failed payload=%s", payload)
 
     async def _drain_heartbeats(self) -> None:
         while True:

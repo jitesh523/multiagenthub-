@@ -12,6 +12,9 @@ from .agents.analyzer import AnalyzerAgent
 from .agents.synthesizer import SynthesizerAgent
 
 
+LAST_METRICS: Dict[str, Any] = {}
+
+
 async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]:
     hub = Hub()
     researcher = ResearcherAgent("researcher", ["research"], hub)
@@ -37,6 +40,9 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
 
     await asyncio.wait_for(orch.execute(), timeout=20)
     final = orch.tasks[t3.id].result or {}
+    # capture metrics snapshot
+    global LAST_METRICS
+    LAST_METRICS = dict(hub.metrics)
 
     for t in tasks:
         t.cancel()
@@ -55,8 +61,24 @@ class App(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         if self.path == "/metrics":
-            # simple static response for now
-            self._json(200, {"status": "ok"})
+            # Expose minimal Prometheus metrics from last run snapshot
+            lines = []
+            m = LAST_METRICS or {}
+            lines.append("# HELP mah_messages_total Total messages sent via hub")
+            lines.append("# TYPE mah_messages_total counter")
+            lines.append(f"mah_messages_total {float(m.get('messages_total', 0.0))}")
+            lines.append("# HELP mah_task_complete_total Completed tasks")
+            lines.append("# TYPE mah_task_complete_total counter")
+            lines.append(f"mah_task_complete_total {float(m.get('task_complete_total', 0.0))}")
+            lines.append("# HELP mah_errors_total Errors observed")
+            lines.append("# TYPE mah_errors_total counter")
+            lines.append(f"mah_errors_total {float(m.get('errors_total', 0.0))}")
+            body = ("\n".join(lines) + "\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self._json(404, {"error": "not found"})
 
