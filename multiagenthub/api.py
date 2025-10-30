@@ -13,6 +13,7 @@ from .agents.synthesizer import SynthesizerAgent
 
 
 LAST_METRICS: Dict[str, Any] = {}
+LAST_HIST: Dict[str, Dict[str, float]] = {}
 
 
 async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]:
@@ -41,8 +42,9 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
     await asyncio.wait_for(orch.execute(), timeout=20)
     final = orch.tasks[t3.id].result or {}
     # capture metrics snapshot
-    global LAST_METRICS
+    global LAST_METRICS, LAST_HIST
     LAST_METRICS = dict(hub.metrics)
+    LAST_HIST = orch.export_histogram()
 
     for t in tasks:
         t.cancel()
@@ -73,6 +75,19 @@ class App(BaseHTTPRequestHandler):
             lines.append("# HELP mah_errors_total Errors observed")
             lines.append("# TYPE mah_errors_total counter")
             lines.append(f"mah_errors_total {float(m.get('errors_total', 0.0))}")
+            # Histograms per task type: mah_task_duration_seconds_bucket{type,le}
+            for ttype, h in (LAST_HIST or {}).items():
+                # buckets: keys with prefix le_
+                total = 0.0
+                for k, v in h.items():
+                    if k.startswith("le_"):
+                        le = k.split("le_",1)[1]
+                        lines.append(f"mah_task_duration_seconds_bucket{{type=\"{ttype}\",le=\"{le}\"}} {float(v)}")
+                        total = max(total, float(v))
+                # +Inf bucket equals total count
+                lines.append(f"mah_task_duration_seconds_bucket{{type=\"{ttype}\",le=\"+Inf\"}} {float(h.get('count', 0.0))}")
+                lines.append(f"mah_task_duration_seconds_count{{type=\"{ttype}\"}} {float(h.get('count', 0.0))}")
+                lines.append(f"mah_task_duration_seconds_sum{{type=\"{ttype}\"}} {float(h.get('sum', 0.0))}")
             body = ("\n".join(lines) + "\n").encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4")

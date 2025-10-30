@@ -26,6 +26,10 @@ class Orchestrator:
         self.heartbeat_timeout_s: float = 5.0
         self.persistence: BasePersistence = persistence or InMemoryPersistence()
         self.event_server: EventServer | None = event_server
+        # metrics: per task.type histogram buckets and totals
+        self._task_start_times: Dict[str, float] = {}
+        self._hist_buckets = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+        self._hist: Dict[str, Dict[str, float]] = {}
 
     def add_task(self, task: Task) -> None:
         self.tasks[task.id] = task
@@ -84,6 +88,8 @@ class Orchestrator:
             "task_start id=%s attempts=%d type=%s deps=%s", task.id, task.attempts, task.type, task.deps
         )
         await self._emit({"event": "task_start", "task_id": task.id, "attempt": task.attempts, "type": task.type})
+        # record start time
+        self._task_start_times[task.id] = asyncio.get_event_loop().time()
         required_skill = task.payload.get("skill")
         agent_id: Optional[str] = self.hub.get_agent_by_skill(required_skill) if required_skill else None
         if not agent_id:
@@ -175,6 +181,8 @@ class Orchestrator:
         logger.info("task_completed id=%s owner=%s", task.id, task.owner)
         await self._emit({"event": "task_completed", "task_id": task.id})
         await self._persist()
+        # record duration into histogram
+        self._observe_duration(task)
         # Propagate outputs to dependent tasks (supports fan-in by merging predecessors)
         for succ in self.graph.successors(task.id):
             s = self.tasks[succ]
@@ -243,6 +251,26 @@ class Orchestrator:
                 if agent_id:
                     self.heartbeats[agent_id] = asyncio.get_event_loop().time()
                     logger.debug("heartbeat agent=%s", agent_id)
+
+    def _observe_duration(self, task: Task) -> None:
+        t0 = self._task_start_times.pop(task.id, None)
+        if t0 is None:
+            return
+        dur = asyncio.get_event_loop().time() - t0
+        ttype = task.type or "unknown"
+        if ttype not in self._hist:
+            self._hist[ttype] = {f"le_{b}": 0.0 for b in self._hist_buckets}
+            self._hist[ttype]["count"] = 0.0
+            self._hist[ttype]["sum"] = 0.0
+        h = self._hist[ttype]
+        for b in self._hist_buckets:
+            if dur <= b:
+                h[f"le_{b}"] += 1.0
+        h["count"] += 1.0
+        h["sum"] += dur
+
+    def export_histogram(self) -> Dict[str, Dict[str, float]]:
+        return self._hist
 
     def _retry_stale_running_tasks(self) -> None:
         now = asyncio.get_event_loop().time()
