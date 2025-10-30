@@ -4,12 +4,14 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict
 
+import os
 from .hub import Hub
 from .orchestrator import Orchestrator
 from .models import Task
 from .agents.researcher import ResearcherAgent
 from .agents.analyzer import AnalyzerAgent
 from .agents.synthesizer import SynthesizerAgent
+from .persistence import InMemoryPersistence, RedisPersistence
 
 
 LAST_METRICS: Dict[str, Any] = {}
@@ -18,6 +20,15 @@ LAST_HIST: Dict[str, Dict[str, float]] = {}
 
 async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]:
     hub = Hub()
+    # choose persistence backend
+    persistence = None
+    if os.getenv("PERSIST", "memory").lower() == "redis":
+        try:
+            persistence = RedisPersistence(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+        except Exception:
+            persistence = InMemoryPersistence()
+    else:
+        persistence = InMemoryPersistence()
     researcher = ResearcherAgent("researcher", ["research"], hub)
     analyzer = AnalyzerAgent("analyzer", ["analyze"], hub)
     synthesizer = SynthesizerAgent("synthesizer", ["synthesize"], hub)
@@ -28,7 +39,7 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
         asyncio.create_task(synthesizer.start()),
     ]
 
-    orch = Orchestrator(hub)
+    orch = Orchestrator(hub, persistence=persistence)
     import uuid
 
     t1 = Task(id=str(uuid.uuid4()), type="sequential", payload={"skill": "research", "query": query})
@@ -39,6 +50,11 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
     orch.add_task(t2)
     orch.add_task(t3)
 
+    # Attempt to resume if state exists
+    try:
+        await orch.load()
+    except Exception:
+        pass
     await asyncio.wait_for(orch.execute(), timeout=20)
     final = orch.tasks[t3.id].result or {}
     # capture metrics snapshot
@@ -94,6 +110,18 @@ class App(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/state":
+            # Return last persisted orchestrator state if available via Redis/memory
+            try:
+                # mirror run_demo_flow persistence selection
+                if os.getenv("PERSIST", "memory").lower() == "redis":
+                    p = RedisPersistence(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+                else:
+                    p = InMemoryPersistence()
+                data = asyncio.run(p.load("orchestrator_state"))  # type: ignore[arg-type]
+            except Exception:
+                data = None
+            self._json(200, data or {"status": "empty"})
         else:
             self._json(404, {"error": "not found"})
 
