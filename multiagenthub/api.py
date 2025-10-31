@@ -11,6 +11,7 @@ from .models import Task
 from .agents.researcher import ResearcherAgent
 from .agents.analyzer import AnalyzerAgent
 from .agents.synthesizer import SynthesizerAgent
+from .agents.planner import PlannerAgent
 from .persistence import InMemoryPersistence, RedisPersistence
 
 
@@ -66,6 +67,19 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
         t.cancel()
 
     return final
+
+
+async def run_plan_flow(goal: str) -> Dict[str, Any]:
+    hub = Hub()
+    planner = PlannerAgent("planner", ["plan"], hub)
+    task = asyncio.create_task(planner.start())
+    orch = Orchestrator(hub)
+    import uuid
+    t = Task(id=str(uuid.uuid4()), type="sequential", payload={"skill": "plan", "goal": goal})
+    orch.add_task(t)
+    res = await asyncio.wait_for(orch.execute(), timeout=10)
+    task.cancel()
+    return res[t.id]
 
 
 class App(BaseHTTPRequestHandler):
@@ -138,6 +152,19 @@ class App(BaseHTTPRequestHandler):
                 result = asyncio.run(run_demo_flow(query))
                 self._json(200, result)
             except Exception as e:  # pragma: no cover - network/server errors
+                self._json(500, {"error": str(e)})
+        elif self.path == "/plan":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+            try:
+                payload = json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            goal = payload.get("goal", "Research topic")
+            try:
+                result = asyncio.run(run_plan_flow(goal))
+                self._json(200, result)
+            except Exception as e:
                 self._json(500, {"error": str(e)})
         else:
             self._json(404, {"error": "not found"})
