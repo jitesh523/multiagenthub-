@@ -21,6 +21,7 @@ class Message(BaseModel):
     result: Optional[Dict[str, Any]] = None
     error: Optional[Dict[str, Any]] = None
     timestamp: float = Field(default_factory=lambda: time.time())
+    trace_id: Optional[str] = None
 
 
 class TaskState(str, Enum):
@@ -44,3 +45,4 @@ class Task(BaseModel):
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     condition: Optional[str] = None  # Python expression evaluated with 'prev' (merged predecessor results)
+    trace_id: Optional[str] = None

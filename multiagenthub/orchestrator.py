@@ -112,7 +112,7 @@ class Orchestrator:
         logger.info(
             "task_start id=%s attempts=%d type=%s deps=%s", task.id, task.attempts, task.type, task.deps
         )
-        await self._emit({"event": "task_start", "task_id": task.id, "attempt": task.attempts, "type": task.type})
+        await self._emit({"event": "task_start", "task_id": task.id, "attempt": task.attempts, "type": task.type, "trace_id": task.trace_id})
         # record start time
         self._task_start_times[task.id] = asyncio.get_event_loop().time()
         required_skill = task.payload.get("skill")
@@ -137,6 +137,7 @@ class Orchestrator:
                     type="sequential",
                     payload={**base_payload, "skill": required_skill, map_key: it},
                     timeout_s=task.timeout_s,
+                    trace_id=task.trace_id,
                 )
                 m_id = str(uuid.uuid4())
                 msg_ids.append(m_id)
@@ -147,6 +148,7 @@ class Orchestrator:
                     type=MessageType.request,
                     method="run_task",
                     params={"task": child_task.dict()},
+                    trace_id=task.trace_id,
                 )
                 coros.append(self.hub.send(m))
             # Send all requests
@@ -177,6 +179,7 @@ class Orchestrator:
                 type=MessageType.request,
                 method="run_task",
                 params={"task": task.dict()},
+                trace_id=task.trace_id,
             )
             await self.hub.send(msg)
             try:
@@ -193,18 +196,18 @@ class Orchestrator:
                         task.max_retries,
                         (resp.error if resp else {"message": "timeout"}),
                     )
-                    await self._emit({"event": "task_retry", "task_id": task.id})
+                    await self._emit({"event": "task_retry", "task_id": task.id, "trace_id": task.trace_id})
                     await asyncio.sleep(0)
                     return
                 task.state = TaskState.failed
                 task.error = (resp.error if resp else {"message": "timeout"}).__str__()
                 logger.error("task_failed id=%s error=%s", task.id, task.error)
-                await self._emit({"event": "task_failed", "task_id": task.id, "error": task.error})
+                await self._emit({"event": "task_failed", "task_id": task.id, "error": task.error, "trace_id": task.trace_id})
                 return
             task.state = TaskState.completed
             task.result = resp.result or {}
         logger.info("task_completed id=%s owner=%s", task.id, task.owner)
-        await self._emit({"event": "task_completed", "task_id": task.id})
+        await self._emit({"event": "task_completed", "task_id": task.id, "trace_id": task.trace_id})
         await self._persist()
         # record duration into histogram
         self._observe_duration(task)
