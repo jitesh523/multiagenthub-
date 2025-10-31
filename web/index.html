@@ -15,8 +15,25 @@
 </head>
 <body>
   <h1>MultiAgentHub Dashboard</h1>
-  <p>Connecting to <code>ws://127.0.0.1:8765</code> ...</p>
-  <div id="log"></div>
+  <section class="card">
+    <h3>Events (WebSocket)</h3>
+    <p>Connecting to <code>ws://127.0.0.1:8765</code> ...</p>
+    <div id="log"></div>
+  </section>
+  <section class="card">
+    <h3>DAG (from /state)</h3>
+    <div id="dag">
+      <div><strong>Nodes</strong>: <ul id="nodes"></ul></div>
+      <div><strong>Edges</strong>: <ul id="edges"></ul></div>
+    </div>
+  </section>
+  <section class="card">
+    <h3>Metrics (from /metrics)</h3>
+    <div id="metrics">
+      <div id="counters"></div>
+      <div id="hists"></div>
+    </div>
+  </section>
   <script>
     const log = document.getElementById('log');
     const ws = new WebSocket('ws://127.0.0.1:8765');
@@ -43,6 +60,88 @@
         entry('Bad event: ' + ev.data);
       }
     };
+
+    // Poll /state for DAG
+    const nodesEl = document.getElementById('nodes');
+    const edgesEl = document.getElementById('edges');
+    async function refreshState() {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/state');
+        const state = await res.json();
+        nodesEl.innerHTML = '';
+        edgesEl.innerHTML = '';
+        const tasks = (state && state.tasks) || {};
+        const edges = (state && state.edges) || [];
+        Object.entries(tasks).forEach(([id, t]) => {
+          const li = document.createElement('li');
+          li.textContent = `${id} [${t.state}] ${t.type || ''}`;
+          nodesEl.appendChild(li);
+        });
+        edges.forEach(([u, v]) => {
+          const li = document.createElement('li');
+          li.textContent = `${u} -> ${v}`;
+          edgesEl.appendChild(li);
+        });
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Poll /metrics for counters and histograms
+    const countersEl = document.getElementById('counters');
+    const histsEl = document.getElementById('hists');
+    function parseProm(text) {
+      const lines = text.split('\n');
+      const metrics = {};
+      for (const line of lines) {
+        if (!line || line.startsWith('#')) continue;
+        // example: mah_messages_total 5
+        const sp = line.trim().split(' ');
+        const nameAndLabels = sp[0];
+        const val = parseFloat(sp[1] || '0');
+        metrics[nameAndLabels] = val;
+      }
+      return metrics;
+    }
+    async function refreshMetrics() {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/metrics');
+        const text = await res.text();
+        const m = parseProm(text);
+        countersEl.innerHTML = '';
+        const c = document.createElement('div');
+        c.textContent = `messages_total=${m['mah_messages_total']||0}, task_complete_total=${m['mah_task_complete_total']||0}, errors_total=${m['mah_errors_total']||0}`;
+        countersEl.appendChild(c);
+        // hist summaries per type (count & avg)
+        histsEl.innerHTML = '';
+        const agg = {};
+        Object.entries(m).forEach(([k, v]) => {
+          if (k.startsWith('mah_task_duration_seconds_count')) {
+            const type = (k.match(/type=\"([^\"]+)\"/)||[])[1] || 'unknown';
+            agg[type] = agg[type] || {count:0,sum:0};
+            agg[type].count = v;
+          }
+          if (k.startsWith('mah_task_duration_seconds_sum')) {
+            const type = (k.match(/type=\"([^\"]+)\"/)||[])[1] || 'unknown';
+            agg[type] = agg[type] || {count:0,sum:0};
+            agg[type].sum = v;
+          }
+        });
+        Object.entries(agg).forEach(([type, obj]) => {
+          const div = document.createElement('div');
+          const avg = obj.count ? (obj.sum/obj.count).toFixed(3) : '0.000';
+          div.textContent = `type=${type} count=${obj.count} avg=${avg}s`;
+          histsEl.appendChild(div);
+        });
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    setInterval(refreshState, 3000);
+    setInterval(refreshMetrics, 3000);
+    refreshState();
+    refreshMetrics();
   </script>
 </body>
 </html>
