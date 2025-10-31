@@ -18,7 +18,15 @@ class Orchestrator:
     """
     Executes a DAG of tasks with retries, timeouts, and dynamic assignment.
     """
-    def __init__(self, hub: Hub, persistence: BasePersistence | None = None, event_server: EventServer | None = None):
+    def __init__(
+        self,
+        hub: Hub,
+        persistence: BasePersistence | None = None,
+        event_server: EventServer | None = None,
+        max_concurrent: int | None = None,
+        default_timeout_s: float = 30.0,
+        default_max_retries: int = 1,
+    ):
         self.hub = hub
         self.graph = nx.DiGraph()
         self.tasks: Dict[str, Task] = {}
@@ -26,6 +34,9 @@ class Orchestrator:
         self.heartbeat_timeout_s: float = 5.0
         self.persistence: BasePersistence = persistence or InMemoryPersistence()
         self.event_server: EventServer | None = event_server
+        self.max_concurrent = max_concurrent
+        self.default_timeout_s = default_timeout_s
+        self.default_max_retries = default_max_retries
         # metrics: per task.type histogram buckets and totals
         self._task_start_times: Dict[str, float] = {}
         self._hist_buckets = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
@@ -33,6 +44,11 @@ class Orchestrator:
 
     def add_task(self, task: Task) -> None:
         self.tasks[task.id] = task
+        # apply defaults if caller used model defaults
+        if task.timeout_s == 30.0:
+            task.timeout_s = self.default_timeout_s
+        if task.max_retries == 1:
+            task.max_retries = self.default_max_retries
         self.graph.add_node(task.id)
         for dep in task.deps:
             self.graph.add_edge(dep, task.id)
@@ -50,15 +66,24 @@ class Orchestrator:
         return ready
 
     async def execute(self) -> Dict[str, Any]:
-        while not all(t.state in (TaskState.completed, TaskState.failed) for t in self.tasks.values()):
+        running: set[asyncio.Task] = set()
+        while not all(t.state in (TaskState.completed, TaskState.failed) for t in self.tasks.values()) or running:
             await self._drain_heartbeats()
             self._retry_stale_running_tasks()
             batch = self.ready_tasks()
-            if not batch:
-                await asyncio.sleep(0.05)
+            # schedule up to available slots
+            slots = None if self.max_concurrent is None else max(0, self.max_concurrent - len(running))
+            to_schedule = batch if slots is None else batch[:slots]
+            for t in to_schedule:
+                running.add(asyncio.create_task(self._run_task(t)))
+            if running:
+                done, pending = await asyncio.wait(running, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
+                running = set(pending)
+                if done:
+                    await self._persist()
                 continue
-            await asyncio.gather(*(self._run_task(t) for t in batch))
-            await self._persist()
+            if not to_schedule:
+                await asyncio.sleep(0.05)
         return {tid: (t.result if t.result else {"error": t.error}) for tid, t in self.tasks.items()}
 
     async def _run_task(self, task: Task) -> None:
