@@ -69,6 +69,7 @@ class Orchestrator:
         running: set[asyncio.Task] = set()
         while not all(t.state in (TaskState.completed, TaskState.failed) for t in self.tasks.values()) or running:
             await self._drain_heartbeats()
+            await self._drain_registry()
             self._retry_stale_running_tasks()
             batch = self.ready_tasks()
             # schedule up to available slots
@@ -279,6 +280,22 @@ class Orchestrator:
                 if agent_id:
                     self.heartbeats[agent_id] = asyncio.get_event_loop().time()
                     logger.debug("heartbeat agent=%s", agent_id)
+
+    async def _drain_registry(self) -> None:
+        while True:
+            msg = await self.hub.recv("orchestrator:reg", timeout=0)
+            if not msg:
+                break
+            if msg.type == MessageType.event and msg.method == "register":
+                params = msg.params or {}
+                aid = params.get("agent_id")
+                skills = params.get("skills") or []
+                if aid and isinstance(skills, list):
+                    try:
+                        self.hub.register_agent(aid, {"skills": skills})
+                        logger.info("agent_registered_remote id=%s skills=%s", aid, skills)
+                    except Exception:
+                        logger.debug("agent_register_failed id=%s", aid)
 
     def _observe_duration(self, task: Task) -> None:
         t0 = self._task_start_times.pop(task.id, None)

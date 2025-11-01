@@ -17,7 +17,21 @@ class AgentBase:
         self._task = None
 
     async def start(self) -> None:
+        # Local registry for in-process hub users
         self.hub.register_agent(self.id, {"skills": self.skills})
+        # Cross-process registration for remote orchestrators
+        try:
+            reg = Message(
+                id="reg",
+                sender=self.id,
+                recipient="orchestrator:reg",
+                type=MessageType.event,
+                method="register",
+                params={"agent_id": self.id, "skills": self.skills},
+            )
+            await self.hub.send(reg)
+        except Exception:
+            pass
         last_hb = 0.0
         while True:
             msg = await self.hub.recv(self.id, timeout=1.0)
