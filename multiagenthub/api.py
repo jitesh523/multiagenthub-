@@ -17,6 +17,9 @@ from .persistence import InMemoryPersistence, RedisPersistence
 
 LAST_METRICS: Dict[str, Any] = {}
 LAST_HIST: Dict[str, Dict[str, float]] = {}
+LAST_AGENTS: Dict[str, Any] = {}
+LAST_HEALTH: Dict[str, float] = {}
+LAST_TRACE_ID: str = ""
 
 
 async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]:
@@ -42,6 +45,7 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
 
     orch = Orchestrator(hub, persistence=persistence)
     import uuid
+    trace_id = str(uuid.uuid4())
 
     t1 = Task(id=str(uuid.uuid4()), type="sequential", payload={"skill": "research", "query": query})
     t2 = Task(id=str(uuid.uuid4()), type="sequential", deps=[t1.id], payload={"skill": "analyze"})
@@ -59,9 +63,18 @@ async def run_demo_flow(query: str = "climate change impacts") -> Dict[str, Any]
     await asyncio.wait_for(orch.execute(), timeout=20)
     final = orch.tasks[t3.id].result or {}
     # capture metrics snapshot
-    global LAST_METRICS, LAST_HIST
+    global LAST_METRICS, LAST_HIST, LAST_AGENTS, LAST_HEALTH, LAST_TRACE_ID
     LAST_METRICS = dict(hub.metrics)
     LAST_HIST = orch.export_histogram()
+    LAST_AGENTS = {
+        "agents": [
+            {"id": "researcher", "skills": ["research"]},
+            {"id": "analyzer", "skills": ["analyze"]},
+            {"id": "synthesizer", "skills": ["synthesize"]},
+        ]
+    }
+    LAST_HEALTH = dict(orch.heartbeats)
+    LAST_TRACE_ID = trace_id
 
     for t in tasks:
         t.cancel()
@@ -99,6 +112,8 @@ class App(BaseHTTPRequestHandler):
             lines.append("# HELP mah_messages_total Total messages sent via hub")
             lines.append("# TYPE mah_messages_total counter")
             lines.append(f"mah_messages_total {float(m.get('messages_total', 0.0))}")
+            if LAST_TRACE_ID:
+                lines.append(f"mah_run_info{{trace_id=\"{LAST_TRACE_ID}\"}} 1")
             lines.append("# HELP mah_task_complete_total Completed tasks")
             lines.append("# TYPE mah_task_complete_total counter")
             lines.append(f"mah_task_complete_total {float(m.get('task_complete_total', 0.0))}")
@@ -136,6 +151,10 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 data = None
             self._json(200, data or {"status": "empty"})
+        elif self.path == "/agents":
+            self._json(200, LAST_AGENTS or {"agents": []})
+        elif self.path == "/health":
+            self._json(200, {"heartbeats": LAST_HEALTH})
         else:
             self._json(404, {"error": "not found"})
 
